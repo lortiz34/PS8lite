@@ -29,6 +29,7 @@ library(tidyverse)
 library(janitor)
 library(skimr)
 library(randomForest)
+library(caret)
 
 # Set seed value of random number generator here:
 set.seed(76)
@@ -39,10 +40,6 @@ test <- read_csv("data/test.csv")
 sample_submission <- read_csv("data/sample_submission.csv")
 ```
 
-Note above that `data/train.csv` is once again all the original training data with 1460 rows, unlike PS7 on LASSO where it only had 50 rows to  artificially create a situation where $p$ is very large relative to $n$.
-
-
-
 
 ***
 
@@ -50,7 +47,7 @@ Note above that `data/train.csv` is once again all the original training data wi
 
 # Preprocessing data
 
-We do some variable cleaning to `training` and `test`. Note how for each step, we apply the changes for both the training and test sets. This is an important principle in machine learning: the training set must be representative of the test set!
+We do some variable cleaning to `training` and `test`. Note how for each step, we apply the changes for both the training and test sets. This is an important principle in machine learning: the training set must be representative of the test set.
 
 
 ## Clean variable names
@@ -76,7 +73,7 @@ test <- test %>%
 
 ## Create new outcome variable
 
-Just like we did in PS3 on CART, we are going to fit our models in log-space for many reasons:
+We are going to fit our models in log-space for many reasons:
 
 1. To avoid situations where we obtain negative predicted values
 1. To unskew the highly right-skewed original outcome variable `SalePrice`
@@ -89,15 +86,13 @@ training <- training %>%
   mutate(logSalePrice = log(SalePrice+1))
 ```
 
-Questions to ask yourself or discuss with your peers
 
-1. Why didn't I apply the same change to the `test` set?
-1. If I transformed the outcome variable now, what will I have to make sure to do later on?
+If you note, this transformation is only done to the `training` set, this is because our `test` set does not have the outcome variabe SalePrice. This is what we are trying to predict with our model. We are transforming the outcome variable above for the `training` set and it is important to make sure that we undo this transformation later on after we fit our model (i.e when we are predicting). 
 
 
 ## Select only numerical predictors
 
-To keep things simple, we're only going to focus on the 36 numerical predictor variables. Given this fact, it's good idea to select only the variables we are going to use. That way when you view them in RStudio's spreadsheet viewer, there is less cognitive load. Think of this as clearing off your desk before you start working.
+To keep things simple, we're only going to focus on the 36 numerical predictor variables. Given this fact, it's good idea to select only the variables we are going to use. 
 
 ```{r}
 training <- training %>% 
@@ -135,7 +130,7 @@ skim(training)
 skim(test)
 ```
 
-An MVP approach to dealing with them is to replace them with the mean of the non-missing values". Note: I know there must be a better way to do this, in particular using the `purrr::map()` function, but done is better than perfect.
+An MVP approach to dealing with them is to replace them with the mean of the non-missing values". Note: there must be a better way to do this, in particular using the `purrr::map()` function, but done is better than perfect.
 
 ```{r}
 training <- training %>% 
@@ -180,30 +175,84 @@ MiscVal + MoSold + YrSold" %>%
 
 ***
 
+# Fitting a `randomForest` via `caret`
 
 
-# Fit a Random Forest model
+## Setup cross-validation
 
-Fit one Random Forest model `model_rf` using any approach you want.
+We're going use `caret` package functionality to
+
+1. Define cross-validation settings. We are going to use cross-validation to generate model error estimates (when using fitted models to make predictions on new independent test data)
+1. Setup a "search grid" of "tuning" parameters to find the "optimal value." By "optimize" we mean pick the value of the "tuning" parameter that yields the lowest cross-validated error estimate.
+
+The latter is like how in the:
+
+1. CART problem set you searched over a range of $\alpha$ values
+1. LASSO problem set you searched over a range of $\lambda$ values
+
+The "tuning" parameter we're going to "optimize" over is the number of randomly chosen variables we use at each split in our CART trees: `mtry`. We're going to search over values 2 through 5 (the maximum number of predictor variables we have access to). 
 
 ```{r}
+# Define cross-validation settings: 10-fold CV
+fit_control <- trainControl(method = "cv", number = 10)
 
+# Setup search grid of "tuning" parameters
+mtry <- 2:10
+tunegrid <- expand.grid(.mtry = mtry)
 ```
 
 
+## Perform cross-validation
 
-***
+Note that this code chunk takes a few minutes to run. So we set this code chucks `cache = TRUE` to save the result when knitting the .Rmd file, so that future knits don't re-run this code block to save time. 
 
+```{r, cache = TRUE}
+model_rf_caret <- caret::train(
+  # Model formula
+  form = model_formula,
+  # Training data
+  data = training, 
+  # Set method to randomForests. Note: this is where you can switch out to
+  # different methods
+  method = "rf",
+  # Score/error metric used:
+  metric = "RMSE",
+  # Cross-validation settings:
+  trControl = fit_control,
+  # Search grid of tuning parameters
+  tuneGrid = tunegrid
+  )
+```
 
-
-# Make predictions and submit to Kaggle
-
-Using `model_rf` make predictions and submit to Kaggle.
+Let's study the output:
 
 ```{r}
-
+model_rf_caret
 ```
 
 
-![](images/score_screenshot_naive.png){ width=100% }
+## Predict on test data
 
+Note how we use the `predict()` function to generate predicted values of `logSalePrice_hat`. By default, the `predict()` function will use the optimal value of `mtry` of 10 which has the lowest RMSE score.
+
+```{r}
+test <- test %>% 
+  mutate(
+    logSalePrice_hat_rf_caret = predict(model_rf_caret, test),
+    SalePrice_hat_rf_caret = exp(logSalePrice_hat_rf_caret) -1
+  )
+
+```
+
+Optionally, create a Kaggle submission.
+
+```{r, eval=FALSE}
+submission_rf_caret <- test %>%
+  mutate(SalePrice = SalePrice_hat_rf_caret)%>%
+  select(Id, SalePrice) 
+
+write_csv(submission_rf_caret, "/Users/lorti/Desktop/SDS 293/PS8lite/data/submission_rf_caret.csv")
+```
+
+
+![](images/score_screenshot_caret.png){ width=100% }
